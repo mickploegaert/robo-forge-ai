@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ROBO Forge AI — Robot Builder AI Tool
 
 Stack: Next.js (App Router) + TypeScript + Tailwind CSS.
@@ -25,3 +26,7 @@ npm run dev
 Notes
 - Nexar (Octopart) typically requires OAuth2 Client Credentials. Here we accept a bearer token in `OCTOPART_API_KEY` for simplicity. Replace `fetchAccessToken` with a real token exchange if needed.
 - All API calls are routed through Next.js API routes under `src/app/api/*`.
+=======
+# robo-forge-ai
+robo forge ai project
+>>>>>>> 9146d9aa0e27055fe271f49c5dc36a327e465ddd
