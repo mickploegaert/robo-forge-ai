@@ -1,11 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const OCTOPART_ENDPOINT = "https://api.nexar.com/graphql"; // Nexar (Octopart) GraphQL endpoint
+const OCTOPART_ENDPOINT = "https://api.nexar.com/graphql";
 
-async function fetchAccessToken(apiKey: string): Promise<string> {
-  // Nexar uses OAuth2 client credentials. Here we support a simple PAT via API key if provided.
-  // For production, replace with proper clientId/clientSecret token flow.
-  return apiKey;
+async function fetchAccessToken(clientId: string, clientSecret: string): Promise<string> {
+  try {
+    const response = await fetch("https://identity.nexar.com/connect/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "supply.domain",
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Token fetch failed: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.access_token;
+  } catch (error) {
+    console.error("Error fetching access token:", error);
+    throw error;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -16,12 +37,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing query" }, { status: 400 });
     }
 
-    const apiKey = process.env.OCTOPART_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "Server missing OCTOPART_API_KEY" }, { status: 500 });
+    const clientId = process.env.NEXAR_CLIENT_ID;
+    const clientSecret = process.env.NEXAR_CLIENT_SECRET;
+    
+    if (!clientId || !clientSecret) {
+      return NextResponse.json({ 
+        error: "Server missing NEXAR_CLIENT_ID or NEXAR_CLIENT_SECRET environment variables" 
+      }, { status: 500 });
     }
 
-    const accessToken = await fetchAccessToken(apiKey);
+    const accessToken = await fetchAccessToken(clientId, clientSecret);
 
     // Basic parts search via Nexar GraphQL (search by q: query)
     const graphQuery = `
@@ -56,7 +81,6 @@ export async function POST(req: NextRequest) {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ query: graphQuery, variables: { q: query } }),
-      // Next.js Fetch Cache control for serverless
       cache: "no-store",
     });
 
@@ -67,8 +91,9 @@ export async function POST(req: NextRequest) {
 
     const data = await resp.json();
     return NextResponse.json({ data });
-  } catch (err: any) {
-    return NextResponse.json({ error: err?.message ?? "Unknown error" }, { status: 500 });
+  } catch (err: unknown) {
+    const error = err as Error;
+    return NextResponse.json({ error: error?.message ?? "Unknown error" }, { status: 500 });
   }
 }
 

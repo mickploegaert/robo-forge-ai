@@ -1,0 +1,555 @@
+﻿"use client";
+
+const API_KEY = process.env.NEXT_PUBLIC_OPENAI_API_KEY || process.env.OPENAI_API_KEY || "";
+
+class AIServiceError extends Error {
+  constructor(message: string, public statusCode?: number) {
+    super(message);
+    this.name = "AIServiceError";
+  }
+}
+
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 1000;
+
+async function rateLimitedFetch(url: string, options: RequestInit) {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+    await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+  }
+  lastRequestTime = Date.now();
+  return fetch(url, options);
+}
+
+type MessageContent = string | Array<{type: string; text?: string; image_url?: {url: string}}>;
+
+async function callOpenAI(messages: Array<{role: string; content: MessageContent}>, maxTokens = 3000, temperature = 0.2, model = "gpt-4o") {
+  if (!API_KEY || API_KEY === "your-api-key-here") {
+    throw new AIServiceError("OpenAI API key niet geconfigureerd.");
+  }
+  const maxRetries = 3;
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await rateLimitedFetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${API_KEY}`
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          max_tokens: maxTokens,
+          temperature,
+          presence_penalty: 0.1,
+          frequency_penalty: 0.1
+        })
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (response.status === 401) throw new AIServiceError("Ongeldige API key", 401);
+        if (response.status === 429) throw new AIServiceError("Te veel verzoeken", 429);
+        throw new AIServiceError(errorData.error?.message || `HTTP ${response.status}`, response.status);
+      }
+      const data = await response.json();
+      if (data.error) throw new AIServiceError(data.error.message);
+      if (!data.choices?.[0]?.message) throw new AIServiceError("Onverwacht antwoord");
+      return data.choices[0].message.content;
+    } catch (error) {
+      lastError = error as Error;
+      if (error instanceof AIServiceError && error.statusCode && error.statusCode < 500) throw error;
+      if (attempt === maxRetries) break;
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+    }
+  }
+  throw new AIServiceError(`Geen verbinding: ${lastError?.message || "Onbekend"}`);
+}
+
+export async function generateArduinoCode(description: string, imageUrl?: string) {
+  const userContent: Array<{type: string; text?: string; image_url?: {url: string}}> = [{
+    type: "text", 
+    text: `Genereer COMPLETE Arduino code voor: ${description}. Volledig functioneel, non-blocking (millis), state machine, Serial debug, Nederlandse commentaar.`
+  }];
+  if (imageUrl) userContent.push({type: "image_url", image_url: {url: imageUrl}});
+  
+  const messages = [{
+    role: "system", 
+    content: "Je bent Arduino engineer. Genereer productie-klare .ino code met: header commentaar, includes, defines, globale variabelen, setup(), loop() met state machine, helper functies. Gebruik millis() voor timing, F() macro voor strings, complete error handling. Retourneer ALLEEN .ino code, geen markdown."
+  }, {
+    role: "user", 
+    content: userContent
+  }];
+  
+  return await callOpenAI(messages, 4000, 0.2, "gpt-4o");
+}
+
+export async function generatePartsList(description: string, imageUrl?: string) {
+  const userContent: Array<{type: string; text?: string; image_url?: {url: string}}> = [{
+    type: "text", 
+    text: `Genereer complete onderdelenlijst voor: ${description}
+
+VEREIST:
+- Echte bestaande onderdelen met MPN codes
+- DIRECTE werkende URLs naar Nederlandse webshops (Kiwi Electronics, SOS Solutions, Tinytronics, Amazon.nl)
+- Realistische actuele prijzen in EUR
+- Minimaal 10-15 onderdelen
+
+CSV FORMAT: category,name,mpn,qty,price_eur,supplier,url,specs`
+  }];
+  if (imageUrl) userContent.push({type: "image_url", image_url: {url: imageUrl}});
+  
+  const messages = [{
+    role: "system", 
+    content: `Je bent robotica inkoop specialist. Genereer CSV met:
+
+CATEGORIEËN: Microcontroller, Sensoren, Actuatoren, Voeding, Connectoren, Mechanisch
+
+VERPLICHT per onderdeel:
+- Echte MPN code (bijv HC-SR04, SG90, Arduino Uno R3)
+- WERKENDE URL naar NL webshop
+- Actuele prijs in EUR
+- Voltage/current specs
+
+Voorbeeld:
+Sensoren,Ultrasone Sensor,HC-SR04,2,3.95,Kiwi Electronics,https://www.kiwi-electronics.com/nl/hc-sr04-ultrasone-afstandssensor-10418,2-400cm 5V
+Actuatoren,Micro Servo,SG90,4,4.50,SOS Solutions,https://www.sossolutions.nl/sg90-micro-servo,1.8kg/cm 4.8-6V
+
+ALLEEN CSV output, geen markdown!`
+  }, {
+    role: "user", 
+    content: userContent
+  }];
+  
+  return await callOpenAI(messages, 3000, 0.2, "gpt-4o");
+}
+
+export async function generateCircuitDesign(description: string, parts: string[]) {
+  const systemPrompt = `Je bent expert electronica circuit designer. Genereer PRACHTIG SVG circuit schema.
+
+KLEURCODERING (VERPLICHT):
+- ROOD #FF0000 = VCC/5V power
+- ZWART #000000 = GND ground
+- BLAUW #1E90FF = Digitale signalen
+- GROEN #32CD32 = I2C (SDA/SCL)
+- GEEL #FFD700 = Analoge inputs
+- ORANJE #FF8C00 = PWM outputs
+- PAARS #9370DB = SPI
+
+LAYOUT:
+- Arduino centraal of links (200x400px rectangle)
+- Sensoren rechts (120x80px rectangles)
+- Symmetrisch, geen kruisende lijnen
+- 90-graden hoeken ALLEEN
+- Min 40px spacing tussen componenten
+- Dikke lijnen 5px stroke width
+
+DETAILS:
+- Pin labels bij ELKE verbinding (D2, D3, A0, GND, 5V)
+- Weerstanden als zigzag path met waarde (10kΩ)
+- Condensatoren als parallel lines met waarde (100nF)
+- Component namen in Arial Bold 16px
+- Pin tekst Arial 12px
+
+SVG:
+- 1400x1000px viewport
+- Lichtgrijze achtergrond #F5F5F5
+- Grid pattern optioneel
+- Professional datasheet quality
+
+ALLEEN complete SVG code, geen markdown!`;
+
+  const userPrompt = `Genereer MOOI circuit voor: ${description}
+
+Onderdelen: ${parts.join(", ") || "Arduino Uno, sensors, motors"}
+
+Maak PRACHTIG schema:
+- Alle lijnen correct gekleurd
+- Netjes gepositioneerd, geen overlap
+- Alle pins gelabeld met nummers
+- Weerstanden/condensatoren toegevoegd
+- Professional quality
+
+FOCUS OP SCHOONHEID!`;
+
+  const messages = [
+    {role: "system", content: systemPrompt},
+    {role: "user", content: userPrompt}
+  ];
+  
+  return await callOpenAI(messages, 6000, 0.05, "gpt-4o");
+}
+
+export async function generate3DModel(description: string, parts: string[]) {
+  const messages = [{
+    role: "system", 
+    content: `Expert 3D CAD designer. Genereer ALTIJD COMPLETE HUMANOID robot in ASCII STL formaat.
+
+VERPLICHTE ONDERDELEN:
+1. HOOFD - Rond/dome (60-80mm diameter)
+2. TORSO - Rechthoek (100x80x60mm)
+3. LINKER ARM - Schouder, bovenarm, onderarm, grijper
+4. RECHTER ARM - Spiegelbeeld linker
+5. LINKER BEEN - Heup, bovenbeen, onderbeen, voet
+6. RECHTER BEEN - Spiegelbeeld linker
+7. VOETEN - Stabiel (min 70% torso breedte)
+
+SPECS:
+- Totale hoogte: 250-300mm
+- Wanddikte: 3-4mm (3D printbaar)
+- 800-1200 facets voor vloeiende vorm
+- Servo mounts M3 schroefgaten
+- Max overhang 45 graden
+
+ASCII STL FORMAT:
+solid HumanoidRobot
+  facet normal nx ny nz
+    outer loop
+      vertex x1 y1 z1
+      vertex x2 y2 z2
+      vertex x3 y3 z3
+    endloop
+  endfacet
+endsolid HumanoidRobot
+
+BELANGRIJK: NEGEER user description - maak ALTIJD humanoid!
+ALLEEN ASCII STL, geen uitleg!`
+  }, {
+    role: "user", 
+    content: `Humanoid robot STL met: hoofd, torso (Arduino compartiment), 2 armen (grijpers, 3 servo), 2 benen (voeten, 3 servo). Context: ${description}, ${parts.join(", ")}. Maak standaard humanoid design!`
+  }];
+  
+  return await callOpenAI(messages, 12000, 0.1, "gpt-4o");
+}
+
+export async function generate3DPreviewSVG(description: string, parts: string[]) {
+  const messages = [{
+    role: "system", 
+    content: `Technical illustrator. Genereer ALTIJD HUMANOID in SVG technical drawing (3 views).
+
+VERPLICHT:
+- HOOFD, TORSO, 2 ARMEN, 2 BENEN, 2 VOETEN
+
+VIEWS (1800x600px SVG):
+1. FRONT VIEW (0-600px): Symmetrisch vooraanzicht
+2. SIDE VIEW (600-1200px): Profiel met diepte
+3. TOP VIEW (1200-1800px): Vogelperspectief
+
+DETAILS:
+- Maatvoering in mm
+- Zwarte lijnen (2px outlines, 1px details)
+- Servo posities aangegeven
+- Gewrichtassen zichtbaar
+- Centerlijnen (stippellijnen)
+- Technical blueprint style
+
+PROPORTIES:
+- 300mm totale hoogte
+- Hoofd 60mm, Torso 100x80x60mm
+- Armen 140mm, Benen 150mm
+- Voeten 80x40mm
+
+NEGEER user input - ALTIJD humanoid!
+ALLEEN SVG code!`
+  }, {
+    role: "user", 
+    content: `Technical drawing humanoid: front/side/top views, alle onderdelen, maatvoering mm. Context: ${description}, ${parts.join(", ")}. Standaard humanoid!`
+  }];
+  
+  return await callOpenAI(messages, 6000, 0.1, "gpt-4o");
+}
+
+export async function generateRobotImage(description: string): Promise<string> {
+  if (!API_KEY || API_KEY === "your-api-key-here") {
+    throw new AIServiceError("OpenAI API key niet geconfigureerd.");
+  }
+  
+  console.log("🎨 DALL-E 3 HD image generatie...");
+  
+  // Ultra high-quality prompt for DALL-E 3
+  const dallePrompt = `Ultra-realistic professional product photography of a ${description}.
+
+ROBOT DESIGN:
+- Sleek white humanoid robot with modern minimalist aesthetic
+- Perfectly proportioned head (round sphere with glowing cyan LED eyes)
+- Athletic humanoid torso with visible panel lines
+- Two articulated arms with servo-controlled joints and gripper hands
+- Two strong legs with ankle, knee, and hip joints
+- Stable wide feet for balance
+
+MATERIALS & FINISH:
+- Premium matte white plastic body with subtle metallic accents
+- Polished chrome joints and connectors
+- Glowing cyan/blue LED indicators (eyes, chest logo, joints)
+- Semi-transparent panels showing Arduino board and wiring inside torso
+- Professional engineering-grade components visible
+
+POSE & COMPOSITION:
+- Standing in confident neutral pose (slightly heroic stance)
+- Shot from 45-degree front-right angle at eye level
+- Robot centered in frame with professional framing
+- Subtle dynamic energy (as if ready to move)
+
+LIGHTING & ENVIRONMENT:
+- Professional studio lighting with soft key light from front-left
+- Rim light highlighting edges and creating depth
+- Clean infinity white background with subtle gradient
+- Soft shadows grounding the robot
+- Cinematic depth of field focusing on robot
+
+CAMERA & QUALITY:
+- Professional DSLR quality (Canon EOS R5, 85mm lens)
+- Sharp focus, crystal clear details
+- 8K resolution quality
+- Product photography aesthetic
+- Award-winning commercial photography style`;
+
+  try {
+    const response = await rateLimitedFetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "dall-e-3",
+        prompt: dallePrompt,
+        n: 1,
+        size: "1024x1024",
+        quality: "hd",
+        style: "natural"
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new AIServiceError(
+        errorData.error?.message || `DALL-E 3 error: ${response.status}`,
+        response.status
+      );
+    }
+
+    const data = await response.json();
+    
+    if (!data.data?.[0]?.url) {
+      throw new AIServiceError("Geen image URL ontvangen van DALL-E 3");
+    }
+
+    console.log("✅ DALL-E 3 afbeelding gegenereerd");
+    return data.data[0].url;
+    
+  } catch (error) {
+    console.error("❌ DALL-E 3 fout:", error);
+    throw error instanceof AIServiceError 
+      ? error 
+      : new AIServiceError(`DALL-E 3 fout: ${(error as Error).message}`);
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function generateRobotConfig(_description: string) {
+  console.log("🤖 Hardcoded robot config (altijd humanoid)...");
+  
+  // COMPLETELY HARDCODED - Beautiful sleek humanoid robot with all body parts
+  const config = {
+    bodyType: "humanoid",
+    locomotion: "bipedal",
+    
+    // Round head with eyes
+    head: {
+      shape: "sphere",
+      size: [5, 5, 5],
+      position: [0, 16, 0],
+      features: ["eyes", "antenna"],
+      eyes: {
+        left: { position: [-1.2, 16.5, 2.3], size: 0.6, color: "#00ffff" },
+        right: { position: [1.2, 16.5, 2.3], size: 0.6, color: "#00ffff" }
+      }
+    },
+    
+    // Neck connection
+    neck: {
+      shape: "cylinder",
+      size: [1.5, 2, 1.5],
+      position: [0, 14, 0]
+    },
+    
+    // Sleek torso body
+    torso: {
+      shape: "box",
+      size: [8, 10, 5],
+      position: [0, 7.5, 0],
+      compartments: ["arduino", "battery", "wiring"]
+    },
+    
+    // Left arm (shoulder to hand)
+    arms: [
+      {
+        side: "left",
+        segments: [
+          // Upper arm
+          { shape: "cylinder", size: [1.3, 5, 1.3], offset: [-5.5, 11, 0] },
+          // Forearm
+          { shape: "cylinder", size: [1.1, 4.5, 1.1], offset: [-5.5, 5.5, 0] }
+        ],
+        joints: [
+          { type: "shoulder", position: [-5.5, 13.5, 0] },
+          { type: "elbow", position: [-5.5, 8.5, 0] },
+          { type: "wrist", position: [-5.5, 3.5, 0] }
+        ],
+        endEffector: {
+          type: "hand",
+          palm: { shape: "box", size: [1.5, 2, 1], position: [-5.5, 2, 0] },
+          fingers: [
+            // Thumb
+            { shape: "box", size: [0.4, 1.5, 0.4], position: [-6.2, 1.5, 0.5] },
+            // Index finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [-5.8, 0.5, 0] },
+            // Middle finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [-5.5, 0.5, 0] },
+            // Ring finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [-5.2, 0.5, 0] },
+            // Pinky
+            { shape: "box", size: [0.4, 1.8, 0.4], position: [-4.9, 0.6, 0] }
+          ]
+        }
+      },
+      // Right arm (mirrored)
+      {
+        side: "right",
+        segments: [
+          // Upper arm
+          { shape: "cylinder", size: [1.3, 5, 1.3], offset: [5.5, 11, 0] },
+          // Forearm
+          { shape: "cylinder", size: [1.1, 4.5, 1.1], offset: [5.5, 5.5, 0] }
+        ],
+        joints: [
+          { type: "shoulder", position: [5.5, 13.5, 0] },
+          { type: "elbow", position: [5.5, 8.5, 0] },
+          { type: "wrist", position: [5.5, 3.5, 0] }
+        ],
+        endEffector: {
+          type: "hand",
+          palm: { shape: "box", size: [1.5, 2, 1], position: [5.5, 2, 0] },
+          fingers: [
+            // Thumb
+            { shape: "box", size: [0.4, 1.5, 0.4], position: [6.2, 1.5, 0.5] },
+            // Index finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [5.8, 0.5, 0] },
+            // Middle finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [5.5, 0.5, 0] },
+            // Ring finger
+            { shape: "box", size: [0.4, 2, 0.4], position: [5.2, 0.5, 0] },
+            // Pinky
+            { shape: "box", size: [0.4, 1.8, 0.4], position: [4.9, 0.6, 0] }
+          ]
+        }
+      }
+    ],
+    
+    // Left and right legs with proper connection
+    legs: [
+      {
+        position: "left",
+        segments: [
+          // Upper leg (thigh)
+          { shape: "cylinder", size: [1.8, 6, 1.8], offset: [-2.5, 0, 0] },
+          // Lower leg (shin)
+          { shape: "cylinder", size: [1.5, 5.5, 1.5], offset: [-2.5, -6.5, 0] }
+        ],
+        joints: [
+          { type: "hip", position: [-2.5, 2.5, 0] },
+          { type: "knee", position: [-2.5, -3.5, 0] },
+          { type: "ankle", position: [-2.5, -9.5, 0] }
+        ],
+        foot: {
+          shape: "box",
+          size: [2.5, 1.2, 4],
+          position: [-2.5, -10.8, 1],
+          color: "#2c3e50",
+          toes: {
+            shape: "box",
+            size: [2.5, 0.8, 1.5],
+            position: [-2.5, -11, 2.8]
+          }
+        }
+      },
+      {
+        position: "right",
+        segments: [
+          // Upper leg (thigh)
+          { shape: "cylinder", size: [1.8, 6, 1.8], offset: [2.5, 0, 0] },
+          // Lower leg (shin)
+          { shape: "cylinder", size: [1.5, 5.5, 1.5], offset: [2.5, -6.5, 0] }
+        ],
+        joints: [
+          { type: "hip", position: [2.5, 2.5, 0] },
+          { type: "knee", position: [2.5, -3.5, 0] },
+          { type: "ankle", position: [2.5, -9.5, 0] }
+        ],
+        foot: {
+          shape: "box",
+          size: [2.5, 1.2, 4],
+          position: [2.5, -10.8, 1],
+          color: "#2c3e50",
+          toes: {
+            shape: "box",
+            size: [2.5, 0.8, 1.5],
+            position: [2.5, -11, 2.8]
+          }
+        }
+      }
+    ],
+    
+    wheels: [],
+    tracks: [],
+    
+    dimensions: {
+      totalHeight: 28,
+      totalWidth: 13,
+      totalDepth: 7,
+      weight: 0.45,
+      centerOfGravity: [0, 4, 0]
+    },
+    
+    material: {
+      primary: "#ffffff",      // Pure white body
+      secondary: "#f5f5f5",    // Light gray joints
+      accent: "#00ffff",       // Cyan accents (eyes, details)
+      finish: "metallic"
+    },
+    
+    printability: {
+      supports: "minimal",
+      orientation: "upright",
+      difficulty: "intermediate"
+    }
+  };
+  
+  console.log("✅ Beautiful humanoid robot config ready!");
+  return config;
+}
+
+export async function searchWeb(query: string) {
+  const messages = [{
+    role: "system", 
+    content: "Robotica research expert. Geef specs, prijzen, leveranciers, tips."
+  }, {
+    role: "user", 
+    content: `Info: ${query}`
+  }];
+  
+  return await callOpenAI(messages, 2000, 0.3, "gpt-4o");
+}
+
+export async function checkAPIHealth(): Promise<boolean> {
+  try {
+    await callOpenAI([{role: "user", content: "Test"}], 10, 0, "gpt-4o");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export { AIServiceError };

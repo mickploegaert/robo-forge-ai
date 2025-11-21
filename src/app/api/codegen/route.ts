@@ -23,20 +23,23 @@ export async function POST(req: NextRequest) {
 
     const client = new OpenAI({ apiKey });
 
+    // Use GPT-4o for best code generation quality
     const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: `Generate Arduino code for: ${description}` },
       ],
       temperature: 0.2,
+      max_tokens: 4000,
     });
 
     const content = response.choices[0]?.message?.content ?? "";
 
     return NextResponse.json({ code: content });
-  } catch (err: any) {
-    return NextResponse.json({ error: err?.message ?? "Unknown error" }, { status: 500 });
+  } catch (err: unknown) {
+    const error = err as Error;
+    return NextResponse.json({ error: error?.message ?? "Unknown error" }, { status: 500 });
   }
 }
 
